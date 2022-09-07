@@ -1,38 +1,32 @@
-class = require '30log'
-Stream = class()
-Stream.data = {}
-Stream.position = 1
+local class = require '30log'
+local Stream = class()
 Stream.__name = "Stream"
-
-function Stream:bsRight(num, pow)
-    return math.floor(num / 2^pow)
-end
-
-function Stream:bsLeft(num, pow)
-    return math.floor(num * 2^pow)
-end
 
 function Stream:bytesToNum(bytes)
 	local n = 0
-	for k,v in ipairs(bytes) do
-		n = self:bsLeft(n, 8) + v
+	for _, v in ipairs(bytes) do
+		n = (n << 8) + v
 	end
 	n = (n > 2147483647) and (n - 4294967296) or n
 	return n
 end
 
 function Stream:__init(param)
-    local str = ""	
-    if (param.inputF ~= nil) then
-	str = io.open(param.inputF, "rb"):read("*all")
-    end
-    if (param.input ~= nil) then
-	str = param.input
-    end
+	self.data = {}
+	self.position = 1
 
-    for i=1,#str do
-	self.data[i] = str:byte(i, i)
-    end
+	local str = ""
+	if (param.inputF ~= nil) then
+		local f = assert(io.open(param.inputF, "rb"), param.inputF)
+		str = f:read("*all")
+	end
+	if (param.input ~= nil) then
+		str = param.input
+	end
+
+	for i=1,#str do
+		self.data[i] = str:byte(i, i)
+	end
 end
 
 function Stream:seek(amount)
@@ -46,15 +40,29 @@ function Stream:readByte()
 	return byte
 end
 
+function Stream:readyReadBit()
+	self.accumulator = 0
+	self.bitCount = 0
+end
+
+function Stream:readBit(num)
+	if self.position <= 0 then self:seek(1) return nil end
+	if self.bitCount <= 0 then
+		self.accumulator = self:readByte()
+		self.bitCount = 8
+	end
+
+	self.bitCount = self.bitCount - num
+	return self.accumulator >> self.bitCount & (2^num - 1)
+end
+
 function Stream:readChars(num)
 	if self.position <= 0 then self:seek(1) return nil end
-	local str = ""
-	local i = 1
-	while i <= num do
-		str = str .. self:readChar()
-		i = i + 1
+	local t = {}
+	for i = 1, num do
+		t[i] = self:readChar()
 	end
-	return str, i-1
+	return table.concat(t)
 end
 
 function Stream:readChar()
@@ -90,14 +98,14 @@ end
 
 function Stream:writeChar(char)
 	if self.position <= 0 then self:seek(1) return end
-	self:writeByte(string.byte(char))
+	self:writeByte(char:byte())
 end
 
 function Stream:writeBytes(buffer)
 	if self.position <= 0 then self:seek(1) return end
-	local str = ""
-	for k,v in pairs(buffer) do
-		str = str .. string.char(v)
+	for _, v in ipairs(buffer) do
+		self:writeByte(v)
 	end
-	writeChars(str)
 end
+
+return Stream

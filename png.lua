@@ -1,13 +1,9 @@
-class = require '30log'
-deflate = require 'deflate'
-require 'stream'
+local class = require '30log'
+local deflate = require 'deflate'
+local Stream = require 'stream'
 
-Chunk = class()
+local Chunk = class()
 Chunk.__name = "Chunk"
-Chunk.length = 0
-Chunk.name = ""
-Chunk.data = ""
-Chunk.crc = ""
 
 function Chunk:__init(stream)
 	if stream.__name == "Chunk" then
@@ -27,15 +23,8 @@ function Chunk:getDataStream()
 	return Stream({input = self.data})
 end
 
-IHDR = Chunk:extends()
+local IHDR = Chunk:extends()
 IHDR.__name = "IHDR"
-IHDR.width = 0
-IHDR.height = 0
-IHDR.bitDepth = 0
-IHDR.colorType = 0
-IHDR.compression = 0
-IHDR.filter = 0
-IHDR.interlace = 0
 
 function IHDR:__init(chunk)
 	self.super.__init(self, chunk)
@@ -49,21 +38,20 @@ function IHDR:__init(chunk)
 	self.interlace = stream:readByte()
 end
 
-IDAT = Chunk:extends()
+local IDAT = Chunk:extends()
 IDAT.__name = "IDAT"
 
 function IDAT:__init(chunk)
 	self.super.__init(self, chunk)
 end
 
-PLTE = Chunk:extends()
+local PLTE = Chunk:extends()
 PLTE.__name = "PLTE"
-PLTE.numColors = 0
-PLTE.colors = {}
 
 function PLTE:__init(chunk)
 	self.super.__init(self, chunk)
-	self.numColors = math.floor(chunk.length/3)
+	self.numColors = chunk.length // 3
+	self.colors = {}
 	local stream = chunk:getDataStream()
 	for i = 1, self.numColors do
 		self.colors[i] = {
@@ -78,48 +66,85 @@ function PLTE:getColor(index)
 	return self.colors[index]
 end
 
-Pixel = class()
-Pixel.__name = "Pixel"
-Pixel.R = 0
-Pixel.G = 0
-Pixel.B = 0
-Pixel.A = 0
+local tRNS = Chunk:extends()
+tRNS.__name = "tRNS"
 
-function Pixel:__init(stream, depth, colorType, palette)
-	local bps = math.floor(depth/8)
+function tRNS:__init(chunk, colorType, palette)
+	self.super.__init(self, chunk)
+
+	local stream = chunk:getDataStream()
 	if colorType == 0 then
-		local grey = stream:readInt(bps)
+		local grey = stream:readInt(2)
+		self.R = grey
+		self.G = grey
+		self.B = grey
+	elseif colorType == 2 then
+		self.R = stream:readInt(2)
+		self.G = stream:readInt(2)
+		self.B = stream:readInt(2)
+	elseif colorType == 3 then
+		self.Alphas = {}
+		for i = 1, chunk.length do
+			self.Alphas[i] = stream:readByte()
+		end
+	else
+		error ('Invalid colortype:' .. colorType)
+	end
+end
+
+function tRNS:getAlpha(index)
+	return self.Alphas[index] or 255
+end
+
+local tEXt = Chunk:extends()
+IDAT.__name = "tEXt"
+
+function tEXt:__init(chunk)
+	self.super.__init(self, chunk)
+	self.key, self.value = self.data:match("(.+)\0(.*)")
+end
+
+local Pixel = class()
+Pixel.__name = "Pixel"
+
+function Pixel:__init(stream, depth, colorType, palette, trns)
+	--0, /*grayscale: 1,2,4,8,16 bit*/
+	--2, /*RGB: 8,16 bit*/
+	--3, /*palette: 1,2,4,8 bit*/
+	--4, /*grayscale with alpha: 8,16 bit*/
+	--6, /*RGB with alpha: 8,16 bit*/
+	local bps = depth // 8
+	if colorType == 0 then
+		local grey = bps > 0 and stream:readInt(bps) or stream:readBit(depth)
 		self.R = grey
 		self.G = grey
 		self.B = grey
 		self.A = 255
-	end
-	if colorType == 2 then
+	elseif colorType == 2 then
 		self.R = stream:readInt(bps)
 		self.G = stream:readInt(bps)
 		self.B = stream:readInt(bps)
 		self.A = 255
-	end
-	if colorType == 3 then
-		local index = stream:readInt(bps)+1
+	elseif colorType == 3 then
+		local index = bps > 0 and stream:readInt(bps) + 1 or stream:readBit(depth) + 1
 		local color = palette:getColor(index)
 		self.R = color.R
 		self.G = color.G
 		self.B = color.B
-		self.A = 255
-	end
-	if colorType == 4 then
+		self.A = trns:getAlpha(index)
+	elseif colorType == 4 then
 		local grey = stream:readInt(bps)
 		self.R = grey
 		self.G = grey
 		self.B = grey
 		self.A = stream:readInt(bps)
-	end
-	if colorType == 6 then
+	elseif colorType == 6 then
 		self.R = stream:readInt(bps)
 		self.G = stream:readInt(bps)
 		self.B = stream:readInt(bps)
 		self.A = stream:readInt(bps)
+	else
+		error ('Invalid colortype:' .. colorType)
 	end
 end
 
@@ -127,53 +152,50 @@ function Pixel:format()
 	return string.format("R: %d, G: %d, B: %d, A: %d", self.R, self.G, self.B, self.A)
 end
 
-ScanLine = class()
+local ScanLine = class()
 ScanLine.__name = "ScanLine"
-ScanLine.pixels = {}
-ScanLine.filterType = 0
 
-function ScanLine:__init(stream, depth, colorType, palette, length)
-	bpp = math.floor(depth/8) * self:bitFromColorType(colorType)
-	bpl = bpp*length
+function ScanLine:__init(stream, depth, colorType, palette, trns, length)
+	local bpp = depth // 8 * self:bitFromColorType(colorType)
+	local bpl = bpp*length
+	self.pixels = {}
 	self.filterType = stream:readByte()
 	stream:seek(-1)
 	stream:writeByte(0)
 	local startLoc = stream.position
 	if self.filterType == 0 then
+		stream:readyReadBit()
 		for i = 1, length do
-			self.pixels[i] = Pixel(stream, depth, colorType, palette)
+			self.pixels[i] = Pixel(stream, depth, colorType, palette, trns)
 		end
-	end
-	if self.filterType == 1 then
+	elseif self.filterType == 1 then
 		for i = 1, length do
-			for j = 1, bpp do
+			for _ = 1, bpp do
 				local curByte = stream:readByte()
 				stream:seek(-(bpp+1))
 				local lastByte = 0
 				if stream.position >= startLoc then lastByte = stream:readByte() or 0 else stream:readByte() end
 				stream:seek(bpp-1)
-				stream:writeByte((curByte + lastByte) % 256)
+				stream:writeByte((curByte + lastByte) & 0xFF)
 			end
 			stream:seek(-bpp)
-			self.pixels[i] = Pixel(stream, depth, colorType, palette)
+			self.pixels[i] = Pixel(stream, depth, colorType, palette, trns)
 		end
-	end
-	if self.filterType == 2 then
+	elseif self.filterType == 2 then
 		for i = 1, length do
-			for j = 1, bpp do
+			for _ = 1, bpp do
 				local curByte = stream:readByte()
 				stream:seek(-(bpl+2))
 				local lastByte = stream:readByte() or 0
 				stream:seek(bpl)
-				stream:writeByte((curByte + lastByte) % 256)
+				stream:writeByte((curByte + lastByte) & 0xFF)
 			end
 			stream:seek(-bpp)
-			self.pixels[i] = Pixel(stream, depth, colorType, palette)
+			self.pixels[i] = Pixel(stream, depth, colorType, palette, trns)
 		end
-	end
-	if self.filterType == 3 then
+	elseif self.filterType == 3 then
 		for i = 1, length do
-			for j = 1, bpp do
+			for _ = 1, bpp do
 				local curByte = stream:readByte()
 				stream:seek(-(bpp+1))
 				local lastByte = 0
@@ -181,15 +203,14 @@ function ScanLine:__init(stream, depth, colorType, palette, length)
 				stream:seek(-(bpl)+bpp-2)
 				local priByte = stream:readByte() or 0
 				stream:seek(bpl)
-				stream:writeByte((curByte + math.floor((lastByte+priByte)/2)) % 256)
+				stream:writeByte((curByte + ((lastByte + priByte) >> 1)) & 0xFF)
 			end
 			stream:seek(-bpp)
-			self.pixels[i] = Pixel(stream, depth, colorType, palette)
+			self.pixels[i] = Pixel(stream, depth, colorType, palette, trns)
 		end
-	end
-	if self.filterType == 4 then
+	elseif self.filterType == 4 then
 		for i = 1, length do
-			for j = 1, bpp do
+			for _ = 1, bpp do
 				local curByte = stream:readByte()
 				stream:seek(-(bpp+1))
 				local lastByte = 0
@@ -200,21 +221,23 @@ function ScanLine:__init(stream, depth, colorType, palette, length)
 				local lastPriByte = 0
 				if stream.position >= startLoc - (length * bpp + 1) then lastPriByte = stream:readByte() or 0 else stream:readByte() end
 				stream:seek(bpl + bpp)
-				stream:writeByte((curByte + self:_PaethPredict(lastByte, priByte, lastPriByte)) % 256)
+				stream:writeByte((curByte + self:_PaethPredict(lastByte, priByte, lastPriByte)) & 0xFF)
 			end
 			stream:seek(-bpp)
-			self.pixels[i] = Pixel(stream, depth, colorType, palette)
+			self.pixels[i] = Pixel(stream, depth, colorType, palette, trns)
 		end
+	else
+		error ('Invalid colortype:' .. colorType)
 	end
 end
 
 function ScanLine:bitFromColorType(colorType)
-	if colorType == 0 then return 1 end
-	if colorType == 2 then return 3 end
-	if colorType == 3 then return 1 end
-	if colorType == 4 then return 2 end
-	if colorType == 6 then return 4 end
-	error 'Invalid colortype'
+	if colorType == 0 then return 1
+	elseif colorType == 2 then return 3
+	elseif colorType == 3 then return 1
+	elseif colorType == 4 then return 2
+	elseif colorType == 6 then return 4 end
+	error ('Invalid colortype:' .. colorType)
 end
 
 function ScanLine:getPixel(pixel)
@@ -232,42 +255,46 @@ function ScanLine:_PaethPredict(a, b, c)
 	return c
 end
 
-pngImage = class()
+local pngImage = class()
 pngImage.__name = "PNG"
-pngImage.width = 0
-pngImage.height = 0
-pngImage.depth = 0
-pngImage.colorType = 0
-pngImage.scanLines = {}
 
 function pngImage:__init(path, progCallback)
 	local str = Stream({inputF = path})
 	if str:readChars(8) ~= "\137\080\078\071\013\010\026\010" then error 'Not a PNG' end
-	local ihdr = {}
-	local plte = {}
+	local ihdr
+	local plte
+	local trns
 	local idat = {}
-	local num = 1
+	local text = {}
 	while true do
-		ch = Chunk(str)
-		if ch.name == "IHDR" then ihdr = IHDR(ch) end
-		if ch.name == "PLTE" then plte = PLTE(ch) end
-		if ch.name == "IDAT" then idat[num] = IDAT(ch) num = num+1 end
-		if ch.name == "IEND" then break end
+		local ch = Chunk(str)
+		if ch.name == "IHDR" then ihdr = IHDR(ch)
+		elseif ch.name == "PLTE" then plte = PLTE(ch)
+		elseif ch.name == "tRNS" then trns = tRNS(ch, ihdr.colorType, plte)
+		elseif ch.name == "IDAT" then table.insert(idat, IDAT(ch))
+		elseif ch.name == "tEXt" then table.insert(text, tEXt(ch))
+		elseif ch.name == "IEND" then break end
 	end
 	self.width = ihdr.width
 	self.height = ihdr.height
 	self.depth = ihdr.bitDepth
 	self.colorType = ihdr.colorType
+	self.scanLines = {}
+	self.text_tbl = {}
 
-	local dataStr = ""
-	for k,v in pairs(idat) do dataStr = dataStr .. v.data end
+	local datas = {}
+	for i, v in ipairs(idat) do datas[i] = v.data end
 	local output = {}
-	deflate.inflate_zlib {input = dataStr, output = function(byte) output[#output+1] = string.char(byte) end, disable_crc = true}
-	imStr = Stream({input = table.concat(output)})
+	deflate.inflate_zlib {input = table.concat(datas), output = function(byte) output[#output+1] = string.char(byte) end, disable_crc = true}
+	local imStr = Stream({input = table.concat(output)})
 
 	for i = 1, self.height do
-		self.scanLines[i] = ScanLine(imStr, self.depth, self.colorType, plte, self.width)
+		self.scanLines[i] = ScanLine(imStr, self.depth, self.colorType, plte, trns, self.width)
 		if progCallback ~= nil then progCallback(i, self.height) end
+	end
+
+	for _, v in ipairs(text) do
+		self.text_tbl[v.key] = v.value
 	end
 end
 
@@ -275,3 +302,5 @@ function pngImage:getPixel(x, y)
 	local pixel = self.scanLines[y].pixels[x]
 	return pixel
 end
+
+return pngImage
